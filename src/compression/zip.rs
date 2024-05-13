@@ -1,83 +1,56 @@
-use std::path::Path;
+use std::fs::File;
+use std::io;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use zip::{write::FileOptions, ZipWriter};
 
-use crate::{
-    core::{c_zip::CompressZip, Compress},
-    extra::try_send_message,
-    Format,
-};
+use super::{get_content_vec, list_all_files};
+use crate::process::Process;
+pub struct CompressZip;
 
-use super::{Message, Process};
+impl<T: AsRef<Path>, O: AsRef<Path>> Process<T, O> for CompressZip {
+    fn process(&self, origin: T, dest: O) -> Result<PathBuf, io::Error> {
+        let mut zip_file_name =
+            PathBuf::from(dest.as_ref().join(&origin.as_ref().file_name().unwrap()));
+        zip_file_name.set_extension("zip");
+        let zip_file = File::create(&zip_file_name)?;
 
-pub struct ProcessZip {
-    message: Message,
-}
+        let mut zip_writer = ZipWriter::new(zip_file);
+        let options = FileOptions::default().compression_method(zip::CompressionMethod::Deflated);
 
-impl Default for ProcessZip {
-    fn default() -> Self {
-        Self {
-            message: Message::new(Format::Zip),
+        for file in list_all_files(&origin)? {
+            let content = get_content_vec(&file)?;
+            zip_writer.start_file(
+                file.strip_prefix(&origin.as_ref().parent().unwrap())
+                    .unwrap()
+                    .to_str()
+                    .unwrap(),
+                options,
+            )?;
+            zip_writer.write_all(&content)?;
         }
+
+        zip_writer.finish()?;
+
+        return Ok(zip_file_name);
     }
 }
 
-impl<T: AsRef<Path>, O: AsRef<Path>> Process<T, O> for ProcessZip {
-    fn process(
-        &self,
-        queue: std::sync::Arc<crossbeam_queue::SegQueue<T>>,
-        dest: std::sync::Arc<O>,
-        sender: Option<std::sync::mpsc::Sender<String>>,
-    ) {
-        let dest = &*dest;
-        while !queue.is_empty() {
-            let dir = match queue.pop() {
-                None => break,
-                Some(d) => d,
-            };
-
-            match CompressZip::compress(dir, dest) {
-                Ok(p) => try_send_message(&sender, self.message.completion_message(p)),
-                Err(e) => try_send_message(&sender, self.message.error_message(e)),
-            }
-        }
-    }
-}
 
 #[cfg(test)]
 mod tests {
-
     use super::*;
-    use crate::core::test_util::{cleanup, setup, Dir};
-    use crate::extra::get_dir_list;
-    use crate::process::message_test;
-    use crossbeam_queue::SegQueue;
-    use function_name::named;
-    use std::sync::{mpsc, Arc};
-    use std::thread;
-
     #[test]
-    #[named]
-    fn process_zip_test() {
-        let Dir { origin, dest } = setup(function_name!());
-        
-        let raw_vec = get_dir_list(origin).unwrap();
-        let queue = SegQueue::new();
-        for i in raw_vec.clone() {
-            queue.push(i);
-        }
-        let (tx, tr) = mpsc::channel();
-        
-        let arc_dest = Arc::new(dest.clone());
-        thread::spawn(move || {
-            let processor = ProcessZip::default();
-            processor.process(Arc::new(queue), arc_dest, Some(tx));
-        });
-        
-        let mut message = vec![];
-        for re in tr {
-            message.push(re);
-        }
+    fn test_compress_zip() {
+        let origin = "/home/datle/Code/data_compressing/test/a.txt";
+        let dest = "/home/datle/Code/data_compressing/";
 
-        message_test::assert_messages(dest, Format::Zip, message);
-        cleanup(function_name!());
+        let origin_path = Path::new(origin);
+        let dest_path = Path::new(dest);
+
+        let compressor = CompressZip;
+
+        let result = compressor.process(origin_path, dest_path);
+        assert!(result.is_ok());
     }
 }

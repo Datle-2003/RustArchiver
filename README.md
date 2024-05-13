@@ -1,0 +1,1 @@
+cargo run source=[file/folder directory] destination=[destination folder] format=[gz|tar|zip] action=[decompress|compress]

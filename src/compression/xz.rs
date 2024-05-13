@@ -1,96 +1,64 @@
-use std::{
-    fs,
-    path::Path,
-    sync::{mpsc::Sender, Arc},
-};
+use std::fs::File;
+use std::io;
+use std::io::{Read, Write};
+use std::path::{Path, PathBuf};
+use xz2::write::XzEncoder;
 
-use crossbeam_queue::SegQueue;
+use crate::compression::tar::CompressTar;
+use crate::process::Process;
 
-use crate::{
-    core::{c_tar::CompressTar, c_xz::CompressXz, Compress},
-    extra::try_send_message,
-    Format,
-};
+pub struct CompressTarXz;
 
-use super::{Message, Process};
+impl<T: AsRef<Path>, O: AsRef<Path>> Process<T, O> for CompressTarXz {
+    fn process(&self, origin: T, dest: O) -> Result<PathBuf, io::Error> {
+        let origin_path = origin.as_ref();
+        let file_name = origin_path.file_stem().unwrap().to_str().unwrap(); // get the name of the file/folder
 
-pub struct ProcessXz {
-    message: Message,
-}
+        println!("file_name: {:?}", file_name);
 
-impl Default for ProcessXz {
-    fn default() -> Self {
-        Self {
-            message: Message::new(Format::Xz),
-        }
-    }
-}
+        let destination_path = dest.as_ref().join(file_name);
 
-impl<T: AsRef<Path>, O: AsRef<Path>> Process<T, O> for ProcessXz {
-    fn process(&self, queue: Arc<SegQueue<T>>, dest: Arc<O>, sender: Option<Sender<String>>) {
-        let dest = &*dest;
-        while !queue.is_empty() {
-            let dir = match queue.pop() {
-                None => break,
-                Some(d) => d,
-            };
-            let tar_path = match CompressTar::compress(&dir, &dest) {
-                Ok(p) => p,
-                Err(e) => {
-                    try_send_message(&sender, format!("Cannot create tarball!: {}", e));
-                    return;
-                }
-            };
-            match CompressXz::compress(&tar_path, &dest) {
-                Ok(p) => {
-                    match fs::remove_file(&tar_path) {
-                        Ok(_) => (),
-                        Err(_) => try_send_message(&sender, format!("Cannot delete tarball!")),
-                    };
-                    try_send_message(&sender, self.message.completion_message(p));
-                }
-                Err(e) => try_send_message(&sender, self.message.error_message(e)),
-            };
-        }
+        println!("destination_path: {:?}", destination_path);
+
+        // compress the file/folder to a tar file, output is .tar file
+        let tar_path = CompressTar::process(&origin, &destination_path)?;
+
+        let xz_path = tar_path.with_extension("tar.xz");
+
+        let mut tar_file = File::open(&tar_path)?; // Open the tar file
+        let xz_file = File::create(&xz_path)?; // Create the xz file
+
+        let mut xz_encoder = XzEncoder::new(xz_file, 9); // Create a new xz encoder
+
+        let mut buffer = Vec::new();
+        tar_file.read_to_end(&mut buffer)?; // Read the tar file into the buffer
+
+        xz_encoder.write_all(&buffer)?; // Write the buffer to the xz file
+
+        xz_encoder.finish()?; // Finish the xz file
+
+        std::fs::remove_file(&tar_path)?; // Remove the tar file (no longer needed
+
+        Ok(xz_path) // Return the path to the xz file
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::{sync::mpsc, thread};
-
-    use function_name::named;
-
-    use crate::{
-        core::test_util::{cleanup, setup, Dir},
-        get_dir_list, process::message_test,
-    };
-
     use super::*;
 
     #[test]
-    #[named]
-    fn process_xz_test() {
-        let Dir { origin, dest } = setup(function_name!());
-        let raw_vec = get_dir_list(origin).unwrap();
-        let queue = SegQueue::new();
-        for i in raw_vec {
-            queue.push(i);
-        }
-        let (tx, tr) = mpsc::channel();
+    fn test_compress_tar_xz() {
+        let origin = "/home/datle/Code/data_compressing/test/";
+        let dest = "/home/datle/Code/data_compressing/";
 
-        let arc_dest = Arc::new(dest.clone());
-        thread::spawn(move || {
-            let processor = ProcessXz::default();
-            processor.process(Arc::new(queue), arc_dest, Some(tx));
-        });
+        let origin_path = Path::new(origin);
+        let dest_path = Path::new(dest);
 
-        let mut message = vec![];
-        for re in tr {
-            message.push(re);
-        }
-        
-        message_test::assert_messages(dest, Format::Xz, message);
-        cleanup(function_name!());
+        let compressor = CompressTarXz;
+
+        let result = compressor.process(origin_path, dest_path);
+
+        assert!(result.is_ok());
     }
 }
